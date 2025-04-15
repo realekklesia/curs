@@ -1,0 +1,114 @@
+require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+const OpenAI = require('openai');
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+async function getCodebaseContents(basePath, ignoreDirs = ['node_modules', '.git']) {
+    const files = [];
+
+    async function walk(dir) {
+        try {
+            const items = await fs.promises.readdir(dir, { withFileTypes: true });
+            for (const item of items) {
+                const fullPath = path.join(dir, item.name);
+                
+                // Skip ignored directories
+                if (item.isDirectory()) {
+                    if (!ignoreDirs.includes(item.name)) {
+                        await walk(fullPath);
+                    }
+                    continue;
+                }
+
+                // Process JavaScript files
+                if (item.name.endsWith('.js')) {
+                    try {
+                        const content = await fs.promises.readFile(fullPath, 'utf8');
+                        files.push({ path: fullPath, content });
+                        console.log(`📄 Found: ${fullPath}`);
+                    } catch (err) {
+                        console.error(`❌ Error reading ${fullPath}:`, err.message);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error(`❌ Error walking directory ${dir}:`, err.message);
+        }
+    }
+
+    await walk(basePath);
+    return files;
+}
+
+function formatForGPT(files) {
+    return files.map(f => `// File: ${f.path}\n${f.content}`).join('\n\n');
+}
+
+async function parseAndWriteFiles(output) {
+    const fileRegex = /\/\/ File: (.+?)\n([\s\S]*?)(?=\/\/ File:|$)/g;
+    let match;
+    let processedFiles = 0;
+
+    while ((match = fileRegex.exec(output)) !== null) {
+        const [, filePath, content] = match;
+        try {
+            // Create backup
+            await fs.promises.copyFile(filePath, `${filePath}.bak`);
+            console.log(`📦 Backed up: ${filePath}`);
+
+            // Write enhanced content
+            await fs.promises.writeFile(filePath, content.trim(), 'utf8');
+            console.log(`✅ Enhanced: ${filePath}`);
+            processedFiles++;
+        } catch (err) {
+            console.error(`❌ Error processing ${filePath}:`, err.message);
+        }
+    }
+
+    return processedFiles;
+}
+
+async function main() {
+    try {
+        console.log('🔍 Scanning for JavaScript files...');
+        const basePath = path.resolve(__dirname);
+        const files = await getCodebaseContents(basePath);
+        
+        if (files.length === 0) {
+            console.log('❌ No JavaScript files found to enhance.');
+            return;
+        }
+
+        console.log(`\n🧠 Sending ${files.length} files to GPT-4.1 for enhancement...`);
+        const inputText = formatForGPT(files);
+
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4.1",
+            messages: [
+                {
+                    role: "system",
+                    content: "You're a senior full-stack engineer. Enhance every file below by improving structure, readability, and performance. Only return the full new file contents, formatted as:\n\n// File: /full/path/to/file.js\n[rewritten code]\n\nDo not skip any file or add explanations."
+                },
+                {
+                    role: "user",
+                    content: inputText
+                }
+            ],
+            temperature: 0.4
+        });
+
+        const output = completion.choices[0].message.content;
+        const processedFiles = await parseAndWriteFiles(output);
+        
+        console.log(`\n✨ Enhancement complete! Processed ${processedFiles} files.`);
+        console.log('💾 Backups have been saved with .bak extension');
+
+    } catch (err) {
+        console.error('\n❌ Fatal error:', err.message);
+        process.exit(1);
+    }
+}
+
+main();

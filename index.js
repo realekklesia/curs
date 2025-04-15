@@ -1,0 +1,170 @@
+require('dotenv').config();
+const express = require('express');
+const OpenAI = require('openai');
+const { Client } = require('@notionhq/client');
+
+const app = express();
+app.use(express.json());
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Initialize Notion client
+const notion = new Client({
+    auth: process.env.NOTION_API_KEY,
+});
+
+// Helper function to convert markdown to Notion blocks
+function markdownToNotionBlocks(markdown) {
+    // Split markdown into lines and convert to Notion blocks
+    const lines = markdown.split('\n');
+    return lines.map(line => ({
+        type: 'paragraph',
+        paragraph: {
+            rich_text: [{
+                type: 'text',
+                text: {
+                    content: line
+                }
+            }]
+        }
+    }));
+}
+
+// POST endpoint to generate content and push to Notion
+app.post('/generate-and-push', async (req, res) => {
+    try {
+        const { topic } = req.body;
+        
+        if (!topic) {
+            return res.status(400).json({ error: 'Topic is required' });
+        }
+
+        console.log(`Generating content for topic: ${topic}`);
+
+        // Generate content using OpenAI
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4",
+            messages: [
+                {
+                    role: "system",
+                    content: "You are a helpful assistant that creates well-structured content in Markdown format."
+                },
+                {
+                    role: "user",
+                    content: topic
+                }
+            ],
+            temperature: 0.7,
+        });
+
+        const generatedContent = completion.choices[0].message.content;
+        console.log('Content generated successfully');
+
+        // Convert markdown to Notion blocks
+        const notionBlocks = markdownToNotionBlocks(generatedContent);
+
+        // Append content to Notion page
+        await notion.blocks.children.append({
+            block_id: process.env.NOTION_PAGE_ID,
+            children: notionBlocks,
+        });
+
+        console.log('Content pushed to Notion successfully');
+
+        res.json({
+            success: true,
+            message: 'Content generated and pushed to Notion successfully',
+            content: generatedContent
+        });
+
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({
+            error: 'An error occurred while processing your request',
+            details: error.message
+        });
+    }
+});
+
+// POST /chat endpoint
+app.post('/chat', async (req, res) => {
+    try {
+        const { messages } = req.body;
+
+        // Validate request body
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({
+                error: 'Invalid request body. Messages array is required.'
+            });
+        }
+
+        // Validate message format
+        const isValidFormat = messages.every(msg => 
+            msg.role && 
+            msg.content && 
+            typeof msg.role === 'string' && 
+            typeof msg.content === 'string'
+        );
+
+        if (!isValidFormat) {
+            return res.status(400).json({
+                error: 'Invalid message format. Each message must have "role" and "content" fields.'
+            });
+        }
+
+        console.log('Processing chat request with messages:', messages);
+
+        // Call OpenAI API
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4",
+            messages: messages,
+            temperature: 0.7,
+        });
+
+        const response = completion.choices[0].message;
+        console.log('Generated response:', response);
+
+        // Send response
+        res.json({
+            message: 'Chat completion successful',
+            response: response
+        });
+
+    } catch (error) {
+        console.error('Error processing chat request:', error);
+        res.status(500).json({
+            error: 'An error occurred while processing your request',
+            details: error.message
+        });
+    }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({
+        error: 'An unexpected error occurred',
+        details: err.message
+    });
+});
+
+const PORT = process.env.PORT || 4567;
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Server is running at http://localhost:${PORT}`);
+    console.log('Environment check:', {
+        port: process.env.PORT,
+        hasOpenAIKey: !!process.env.OPENAI_API_KEY
+    });
+});
+
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use. Try killing the previous server or change the port.`);
+        process.exit(1);
+    } else {
+        console.error('Server error:', err);
+    }
+});
